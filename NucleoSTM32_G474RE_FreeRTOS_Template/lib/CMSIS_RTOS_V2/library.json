@@ -1,0 +1,9 @@
+{
+  "name": "CMSIS_RTOS_V2",
+  "version": "1.0.0",
+  "build": {
+    "srcFilter": [
+      "+<*.c>"
+    ]
+  }
+}
