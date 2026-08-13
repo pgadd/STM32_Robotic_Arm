@@ -1,3 +1,5 @@
+#include <math.h>
+
 #include "main_app.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -60,15 +62,28 @@ void TaskArmPlanarIK(void *pvParameters) {
 
     /* Start centered in the workspace rather than at 0 degrees, so the arm
      * doesn't snap on the first tick after boot. */
-    float shoulder_deg = (SHOULDER_ANGLE_MIN_DEG + SHOULDER_ANGLE_MAX_DEG) * 0.5f;
-    float elbow_deg = (ELBOW_ANGLE_MIN_DEG + ELBOW_ANGLE_MAX_DEG) * 0.5f;
+    float shoulder_deg = 45.0f;
+    float elbow_deg = 45.0f;
+    float last_target_x_mm = 0.0f;
+    float last_target_y_mm = 0.0f;
 
     for (;;) {
+        float raw_x = joystick_dma[0];
+        float raw_y = joystick_dma[1];
         float adc_x = ReadConditionedAxis(&filt_x, &joystick_dma[0]);
         float adc_y = ReadConditionedAxis(&filt_y, &joystick_dma[1]);
 
-        float target_x_mm = MapRange(adc_x, 0.0f, ADC_COUNTS_MAX, WORKSPACE_X_MIN_MM, WORKSPACE_X_MAX_MM);
-        float target_y_mm = MapRange(adc_y, 0.0f, ADC_COUNTS_MAX, WORKSPACE_Y_MIN_MM, WORKSPACE_Y_MAX_MM);
+        float target_x_mm = last_target_x_mm;
+        float target_y_mm = last_target_y_mm;
+
+        if (fabsf(raw_x - ADC_CENTER) > ADC_DEADBAND) {
+            target_x_mm = MapRange(adc_x, 0.0f, ADC_COUNTS_MAX, WORKSPACE_X_MIN_MM, WORKSPACE_X_MAX_MM);
+            last_target_x_mm = target_x_mm;
+        }
+        if (fabsf(raw_y - ADC_CENTER) > ADC_DEADBAND) {
+            target_y_mm = MapRange(adc_y, 0.0f, ADC_COUNTS_MAX, WORKSPACE_Y_MIN_MM, WORKSPACE_Y_MAX_MM);
+            last_target_y_mm = target_y_mm;
+        }
 
         ArmIK_Result ik;
         if (ArmIK_Solve(target_x_mm, target_y_mm, LINK1_LENGTH_MM, LINK2_LENGTH_MM, &ik)) {
@@ -109,13 +124,26 @@ void TaskBaseAndWrist(void *pvParameters) {
 
     float base_deg = (BASE_ANGLE_MIN_DEG + BASE_ANGLE_MAX_DEG) * 0.5f;
     float wrist_deg = (WRIST_ANGLE_MIN_DEG + WRIST_ANGLE_MAX_DEG) * 0.5f;
+    float last_target_base_deg = base_deg;
+    float last_target_wrist_deg = wrist_deg;
 
     for (;;) {
+        float raw_base = joystick_dma[2];
+        float raw_wrist = joystick_dma[3];
         float adc_base = ReadConditionedAxis(&filt_base, &joystick_dma[2]);
         float adc_wrist = ReadConditionedAxis(&filt_wrist, &joystick_dma[3]);
 
-        float target_base = MapRange(adc_base, 0.0f, ADC_COUNTS_MAX, BASE_ANGLE_MIN_DEG, BASE_ANGLE_MAX_DEG);
-        float target_wrist = MapRange(adc_wrist, 0.0f, ADC_COUNTS_MAX, WRIST_ANGLE_MIN_DEG, WRIST_ANGLE_MAX_DEG);
+        float target_base = last_target_base_deg;
+        float target_wrist = last_target_wrist_deg;
+
+        if (fabsf(raw_base - ADC_CENTER) > ADC_DEADBAND) {
+            target_base = MapRange(adc_base, 0.0f, ADC_COUNTS_MAX, BASE_ANGLE_MIN_DEG, BASE_ANGLE_MAX_DEG);
+            last_target_base_deg = target_base;
+        }
+        if (fabsf(raw_wrist - ADC_CENTER) > ADC_DEADBAND) {
+            target_wrist = MapRange(adc_wrist, 0.0f, ADC_COUNTS_MAX, WRIST_ANGLE_MIN_DEG, WRIST_ANGLE_MAX_DEG);
+            last_target_wrist_deg = target_wrist;
+        }
 
         base_deg = RateLimitStep(base_deg, target_base, MAX_STEP_DEG_PER_TICK);
         wrist_deg = RateLimitStep(wrist_deg, target_wrist, MAX_STEP_DEG_PER_TICK);
