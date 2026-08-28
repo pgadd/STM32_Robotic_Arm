@@ -1,176 +1,113 @@
 #include <math.h>
+#include <string.h>
+#include <stdint.h>
 
-#include "main_app.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 #include "stm32g4xx_hal.h"
 #include "main.h"
 
-#include "robot_config.h"
-#include "kinematics.h"
-#include "signal_utils.h"
+#include "main_app.h"
+#include "motor_pwm.h"
+#include "joystick_adc.h"
+#include "adc_dma.h"
+#include "uart_buffer.h"
 
-extern ADC_HandleTypeDef hadc1;
-extern TIM_HandleTypeDef htim3;
-extern TIM_HandleTypeDef htim16;
-extern TIM_HandleTypeDef htim17;
-extern uint32_t SystemCoreClock;
+#define SHOULDER_ARM 90.0f
+#define ELBOW_ARM 95.0f
 
-/* Filled continuously by ADC1 + DMA1 in circular mode (see MX_ADC1_Init /
- * MX_DMA_Init in main.c) -- no CPU polling required to keep it fresh.
- * [0]=J1 X (PA0), [1]=J1 Y (PA1), [2]=J2 X (PC0), [3]=J2 Y (PC1) */
-volatile uint16_t joystick_dma[4];
+typedef struct {
+    int32_t x; //length
+    int32_t y; //Width
+    int32_t z; //Height
+} TargetPosition;
 
-void Route_TIM16_To_D15(void) {
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+typedef struct {
+    float theta1; // Base
+    float theta2; // Shoulder
+    float theta3; // Elbow
+} TargetAngles;
 
-    // Redirect TIM16_CH1 from hidden PA12 over to Arduino header D15 (PB8)
-    GPIO_InitStruct.Pin = GPIO_PIN_8;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF1_TIM16;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-}
+QueueHandle_t TargetPositionQueue;
+QueueHandle_t TargetAnglesQueue;
 
-static void ConfigServoTimer(TIM_HandleTypeDef *htim) {
-    // 1MHz timer tick regardless of SYSCLK, 20000 ticks -> 20ms period (50Hz)
-    uint32_t prescaler = (SystemCoreClock / 1000000) - 1;
-    htim->Instance->PSC = prescaler;
-    htim->Instance->ARR = (SERVO_PWM_PERIOD_US) - 1;
-}
+uint16_t adc_buffer[4];
+void Input_Task(void *argument);
+void Input_Task(void *argument) {
+    TargetPosition target = {0};
+    char msg[50];
+    //HAL_UART_Transmit(&lpuart1, "3\r\n", 3, 100);
 
-/* Reads a joystick channel, applies EMA smoothing then a center deadband.
- * Returns the conditioned value still in raw ADC-count units (0..4095). */
-static float ReadConditionedAxis(EmaFilter *filt, volatile uint16_t *dma_slot) {
-    float raw = EmaFilter_Update(filt, (float)(*dma_slot), ADC_FILTER_ALPHA);
-    return ApplyDeadband(raw, ADC_CENTER, ADC_DEADBAND);
-}
+    while(1) {
+        //HAL_UART_Transmit(&lpuart1, "4\r\n", 3, 100);
 
-/* theta1/theta2: shoulder + elbow, solved via 2-link planar IK from
- * joystick 1's (x, y) deflection. TIM3 CH1 = shoulder (D12), CH2 = elbow (D9). */
-void TaskArmPlanarIK(void *pvParameters) {
-    (void)pvParameters;
-    ConfigServoTimer(&htim3);
-    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+        uint16_t raw_x_len = adc_buffer[0]; // Joy 1 X
+        uint16_t raw_y_wid = adc_buffer[1]; // Joy 1 Y
+        uint16_t raw_z_hgt = adc_buffer[2]; // Joy 2 Y
+        uint16_t raw_claw  = adc_buffer[3]; // Joy 2 X
 
-    EmaFilter filt_x, filt_y;
-    EmaFilter_Reset(&filt_x);
-    EmaFilter_Reset(&filt_y);
+        if (raw_x_len > 2500 && raw_y_wid > 2000 && raw_z_hgt > 2000) {
+            target.x += 1;
+        } else if (raw_x_len < 1100 && raw_y_wid < 1550) {
+            target.x -= 1;
+        } 
 
-    /* Start centered in the workspace rather than at 0 degrees, so the arm
-     * doesn't snap on the first tick after boot. */
-    float shoulder_deg = 45.0f;
-    float elbow_deg = 45.0f;
-    float last_target_x_mm = 0.0f;
-    float last_target_y_mm = 0.0f;
+        if (raw_y_wid < 1500 && raw_x_len > 2800) {
+            target.y += 1;
+        } else if (raw_y_wid > 2250 && raw_z_hgt > 2000 && raw_x_len < 1100) {
+            target.y -= 1;
+        } 
 
-    for (;;) {
-        float raw_x = joystick_dma[0];
-        float raw_y = joystick_dma[1];
-        float adc_x = ReadConditionedAxis(&filt_x, &joystick_dma[0]);
-        float adc_y = ReadConditionedAxis(&filt_y, &joystick_dma[1]);
+        if (raw_z_hgt < 700 && raw_claw > 2900) {
+            target.z += 1;
+        } else if (raw_z_hgt > 2450 && raw_claw < 1100) {
+            target.z -= 1;
+        } 
 
-        float target_x_mm = last_target_x_mm;
-        float target_y_mm = last_target_y_mm;
+        
+        //HAL_UART_Transmit(&lpuart1, "5\r\n", 3, 100);
 
-        if (fabsf(raw_x - ADC_CENTER) > ADC_DEADBAND) {
-            target_x_mm = MapRange(adc_x, 0.0f, ADC_COUNTS_MAX, WORKSPACE_X_MIN_MM, WORKSPACE_X_MAX_MM);
-            last_target_x_mm = target_x_mm;
-        }
-        if (fabsf(raw_y - ADC_CENTER) > ADC_DEADBAND) {
-            target_y_mm = MapRange(adc_y, 0.0f, ADC_COUNTS_MAX, WORKSPACE_Y_MIN_MM, WORKSPACE_Y_MAX_MM);
-            last_target_y_mm = target_y_mm;
-        }
+        snprintf(msg, sizeof(msg), "J1X: %d, J1Y: %d, J2Y: %d, J2X: %d\r\n", raw_x_len, raw_y_wid, raw_z_hgt, raw_claw);
 
-        ArmIK_Result ik;
-        if (ArmIK_Solve(target_x_mm, target_y_mm, LINK1_LENGTH_MM, LINK2_LENGTH_MM, &ik)) {
-            float target_shoulder = ClampF(ik.shoulder_deg, SHOULDER_ANGLE_MIN_DEG, SHOULDER_ANGLE_MAX_DEG);
-            float target_elbow = ClampF(ik.elbow_deg, ELBOW_ANGLE_MIN_DEG, ELBOW_ANGLE_MAX_DEG);
+        HAL_UART_Transmit(&lpuart1, msg, strlen(msg), 500);
 
-            // Step toward the IK solution instead of jumping straight to it.
-            shoulder_deg = RateLimitStep(shoulder_deg, target_shoulder, MAX_STEP_DEG_PER_TICK);
-            elbow_deg = RateLimitStep(elbow_deg, target_elbow, MAX_STEP_DEG_PER_TICK);
+        xQueueOverwrite(TargetPositionQueue, &target);
 
-            uint32_t pulse_shoulder = AngleDegToPulseUs(shoulder_deg, SHOULDER_ANGLE_MIN_DEG, SHOULDER_ANGLE_MAX_DEG,
-                                                          SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
-            uint32_t pulse_elbow = AngleDegToPulseUs(elbow_deg, ELBOW_ANGLE_MIN_DEG, ELBOW_ANGLE_MAX_DEG,
-                                                       SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
+        vTaskDelay(500);
 
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse_shoulder);
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pulse_elbow);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(CONTROL_LOOP_PERIOD_MS));
     }
 }
 
-/* theta0/theta3: base rotation + wrist/gripper, driven directly from
- * joystick 2 -- no IK, just a straight ADC-to-angle map. X axis rotates the
- * whole arm's plane (TIM16 CH1 / D15), Y axis drives the wrist or gripper
- * (TIM17 CH1 / D11). */
-void TaskBaseAndWrist(void *pvParameters) {
-    (void)pvParameters;
-    ConfigServoTimer(&htim16);
-    ConfigServoTimer(&htim17);
-    HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1);
-    HAL_TIM_PWM_Start(&htim17, TIM_CHANNEL_1);
-
-    EmaFilter filt_base, filt_wrist;
-    EmaFilter_Reset(&filt_base);
-    EmaFilter_Reset(&filt_wrist);
-
-    float base_deg = (BASE_ANGLE_MIN_DEG + BASE_ANGLE_MAX_DEG) * 0.5f;
-    float wrist_deg = (WRIST_ANGLE_MIN_DEG + WRIST_ANGLE_MAX_DEG) * 0.5f;
-    float last_target_base_deg = base_deg;
-    float last_target_wrist_deg = wrist_deg;
-
-    for (;;) {
-        float raw_base = joystick_dma[2];
-        float raw_wrist = joystick_dma[3];
-        float adc_base = ReadConditionedAxis(&filt_base, &joystick_dma[2]);
-        float adc_wrist = ReadConditionedAxis(&filt_wrist, &joystick_dma[3]);
-
-        float target_base = last_target_base_deg;
-        float target_wrist = last_target_wrist_deg;
-
-        if (fabsf(raw_base - ADC_CENTER) > ADC_DEADBAND) {
-            target_base = MapRange(adc_base, 0.0f, ADC_COUNTS_MAX, BASE_ANGLE_MIN_DEG, BASE_ANGLE_MAX_DEG);
-            last_target_base_deg = target_base;
-        }
-        if (fabsf(raw_wrist - ADC_CENTER) > ADC_DEADBAND) {
-            target_wrist = MapRange(adc_wrist, 0.0f, ADC_COUNTS_MAX, WRIST_ANGLE_MIN_DEG, WRIST_ANGLE_MAX_DEG);
-            last_target_wrist_deg = target_wrist;
-        }
-
-        base_deg = RateLimitStep(base_deg, target_base, MAX_STEP_DEG_PER_TICK);
-        wrist_deg = RateLimitStep(wrist_deg, target_wrist, MAX_STEP_DEG_PER_TICK);
-
-        uint32_t pulse_base = AngleDegToPulseUs(base_deg, BASE_ANGLE_MIN_DEG, BASE_ANGLE_MAX_DEG,
-                                                  SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
-        uint32_t pulse_wrist = AngleDegToPulseUs(wrist_deg, WRIST_ANGLE_MIN_DEG, WRIST_ANGLE_MAX_DEG,
-                                                   SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
-
-        __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, pulse_base);
-        __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, pulse_wrist);
-
-        vTaskDelay(pdMS_TO_TICKS(CONTROL_LOOP_PERIOD_MS));
-    }
+void Kinematics_Task(void *argument);
+void Kinematics_Task(void *argument) {
+    
 }
+
+
 
 void App_Main(void) {
-    // Redirect TIM16_CH1 from hidden PA12 over to Arduino header D15 (PB8)
-    Route_TIM16_To_D15();
+    //HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 0, 0);
+    Motor_Init();
+    ADC_Init();
+    DMA_Init(&hadc1);
+    UART_Init();
+    TargetPositionQueue = xQueueCreate(1, sizeof(TargetPosition));
+    TargetAnglesQueue = xQueueCreate(1, sizeof(TargetAngles));
 
-    // Start background DMA using the flawless initialization generated by CubeMX in main.c
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)joystick_dma, 4);
+    HAL_UART_Transmit(&lpuart1, "1\r\n", 3, 100);
 
-    if (xTaskCreate(TaskArmPlanarIK, "ArmIK", 384, NULL, tskIDLE_PRIORITY + 2, NULL) != pdPASS) {
-        Error_Handler();
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 4);
+
+    HAL_UART_Transmit(&lpuart1, "2\r\n", 3, 100);
+
+    BaseType_t out = xTaskCreate(Input_Task, "Input", 512, NULL, 1, NULL);
+    if (out == pdPASS) {
+        HAL_UART_Transmit(&lpuart1, (uint8_t*)"task successful\r\n", strlen("task successful"), 500);
+    } else {
+        HAL_UART_Transmit(&lpuart1, (uint8_t*)"task failed\r\n", strlen("task failed"), 500);
     }
-    if (xTaskCreate(TaskBaseAndWrist, "BaseWrist", 256, NULL, tskIDLE_PRIORITY + 2, NULL) != pdPASS) {
-        Error_Handler();
-    }
+
+    vTaskStartScheduler();
+
 }
