@@ -1,6 +1,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -29,13 +30,16 @@ typedef struct {
     float theta3; // Elbow
 } TargetAngles;
 
+
+TargetAngles target_angles = {0};
+TargetPosition target = {0};
+
 QueueHandle_t TargetPositionQueue;
 QueueHandle_t TargetAnglesQueue;
 
 uint16_t adc_buffer[4];
 void Input_Task(void *argument);
 void Input_Task(void *argument) {
-    TargetPosition target = {0};
     char msg[50];
     //HAL_UART_Transmit(&lpuart1, "3\r\n", 3, 100);
 
@@ -81,7 +85,17 @@ void Input_Task(void *argument) {
 
 void Kinematics_Task(void *argument);
 void Kinematics_Task(void *argument) {
+    TargetPosition local = {0};
+    while (1) {
+        xQueueReceive(TargetPositionQueue, &local, portMAX_DELAY);
+
+        target_angles.theta1 = atan2(local.y, local.x) * (180.0f / M_PI);
+        float r = sqrt((local.x * local.x) + (local.y * local.y));
+
+    }
     
+
+
 }
 
 
