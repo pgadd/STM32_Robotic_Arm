@@ -52,8 +52,6 @@ void Input_Task(void *argument) {
     while(1) {
         //HAL_UART_Transmit(&lpuart1, "4\r\n", 3, 100);
 
-        
-
         uint16_t raw_x_len = adc_buffer[0]; // Joy 1 X
         uint16_t raw_y_wid = adc_buffer[1]; // Joy 1 Y
         uint16_t raw_z_hgt = adc_buffer[2]; // Joy 2 Y
@@ -86,15 +84,27 @@ void Input_Task(void *argument) {
             target.C += 20;
         }
 
-        float radius = sqrt((target.x * target.x) + (target.y + target.y));
+        float radius = sqrt((target.x * target.x) + (target.y * target.y));
         float hypotenuse = sqrt ((radius * radius) + (target.z * target.z)); 
         float max_distance = SHOULDER_ARM + ELBOW_ARM;
+        float min_distance = (SHOULDER_ARM > ELBOW_ARM) ? SHOULDER_ARM - ELBOW_ARM : ELBOW_ARM - SHOULDER_ARM;
 
-        if (hypotenuse > max_distance || radius > max_distance) {
+
+        //Boundary check
+        if (hypotenuse + 5 > max_distance) {
             target = backup;
+        } else if (hypotenuse - 5 < min_distance) {
+            target = backup; 
+        } else if (target.z - 1 < 0) {
+            target = backup; 
+        }
+
+        if (target.C < 500) {
+            target.C = 500;
+        } else if (target.C > 2500) {
+            target.C = 2500;
         }
         
-        //HAL_UART_Transmit(&lpuart1, "5\r\n", 3, 100);
 
         snprintf(msg, sizeof(msg), "J1X: %d, J1Y: %d, J2Y: %d, J2X: %d\r\n", raw_x_len, raw_y_wid, raw_z_hgt, raw_claw);
 
@@ -193,11 +203,7 @@ void App_Main(void) {
     TargetPositionQueue = xQueueCreate(1, sizeof(TargetPosition));
     TargetAnglesQueue = xQueueCreate(1, sizeof(TargetAngles));
 
-    //HAL_UART_Transmit(&lpuart1, "1\r\n", 3, 100);
-
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 4);
-
-    //HAL_UART_Transmit(&lpuart1, "2\r\n", 3, 100);
 
     xTaskCreate(Input_Task, "Input", 256, NULL, 1, NULL);
     xTaskCreate(Kinematics_Task, "Calculate", 256, NULL, 2, NULL);
