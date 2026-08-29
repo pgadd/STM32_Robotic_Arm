@@ -52,10 +52,15 @@ void Input_Task(void *argument) {
     while(1) {
         //HAL_UART_Transmit(&lpuart1, "4\r\n", 3, 100);
 
+        
+
         uint16_t raw_x_len = adc_buffer[0]; // Joy 1 X
         uint16_t raw_y_wid = adc_buffer[1]; // Joy 1 Y
         uint16_t raw_z_hgt = adc_buffer[2]; // Joy 2 Y
         uint16_t raw_claw  = adc_buffer[3]; // Joy 2 X
+
+        TargetPosition backup = target; //Backup state
+
 
         if (raw_x_len > 2500 && raw_y_wid > 2000 && raw_z_hgt > 2000) {
             target.x += 1;
@@ -76,11 +81,18 @@ void Input_Task(void *argument) {
         } 
 
         if(raw_claw < 1050 && raw_z_hgt > 1605){
-            target.C -= 1;
+            target.C -= 20;
         } else if (raw_claw > 2900 && raw_z_hgt < 1621) {
-            target.C += 1;
+            target.C += 20;
         }
 
+        float radius = sqrt((target.x * target.x) + (target.y + target.y));
+        float hypotenuse = sqrt ((radius * radius) + (target.z * target.z)); 
+        float max_distance = SHOULDER_ARM + ELBOW_ARM;
+
+        if (hypotenuse > max_distance || radius > max_distance) {
+            target = backup;
+        }
         
         //HAL_UART_Transmit(&lpuart1, "5\r\n", 3, 100);
 
