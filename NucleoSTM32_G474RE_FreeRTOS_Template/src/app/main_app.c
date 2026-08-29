@@ -22,6 +22,7 @@ typedef struct {
     int32_t x; //length
     int32_t y; //Width
     int32_t z; //Height
+    int32_t C; //Claw
 } TargetPosition;
 
 typedef struct {
@@ -42,6 +43,10 @@ void Input_Task(void *argument);
 void Input_Task(void *argument) {
     char msg[50];
     //HAL_UART_Transmit(&lpuart1, "3\r\n", 3, 100);
+    target.x = 0;
+    target.y = (int)ELBOW_ARM;
+    target.z = (int)SHOULDER_ARM;
+    target.C = 0;
 
     while(1) {
         //HAL_UART_Transmit(&lpuart1, "4\r\n", 3, 100);
@@ -69,6 +74,12 @@ void Input_Task(void *argument) {
             target.z -= 1;
         } 
 
+        if(raw_claw < 1050 && raw_z_hgt > 1605){
+            target.C -= 1;
+        } else if (raw_claw > 2900 && raw_z_hgt < 1621) {
+            target.C += 1;
+        }
+
         
         //HAL_UART_Transmit(&lpuart1, "5\r\n", 3, 100);
 
@@ -90,14 +101,82 @@ void Kinematics_Task(void *argument) {
         xQueueReceive(TargetPositionQueue, &local, portMAX_DELAY);
 
         target_angles.theta1 = atan2(local.y, local.x) * (180.0f / M_PI);
+
         float r = sqrt((local.x * local.x) + (local.y * local.y));
 
-    }
-    
+        float d = sqrt((r * r) + (local.z * local.z));
 
+        target_angles.theta2 = (acosf(((SHOULDER_ARM * SHOULDER_ARM) + (d * d) - (ELBOW_ARM * ELBOW_ARM))/(2 * SHOULDER_ARM * d)) *(180.0f / M_PI)) + (atan2f(local.z, r) * (180.0f / M_PI));
+
+        float e = acosf(((SHOULDER_ARM * SHOULDER_ARM) + (ELBOW_ARM * ELBOW_ARM) - (d * d))/ (2 * SHOULDER_ARM * ELBOW_ARM)) * (180.0f / M_PI);
+
+        if ( e >= 90.0f) {
+            target_angles.theta3 = e - 90.0f;
+        } else if ( e < 90.0f) {
+            target_angles.theta3 = 90.0f - e;
+        }
+
+        xQueueOverwrite(TargetAnglesQueue, &target_angles);
+ 
+    }
 
 }
 
+
+void Servo_Task(void* pvParameter);
+void Servo_Task(void* pvParameter) {
+    TargetAngles local = {90.0f, 90.0f, 90.0f};
+    TargetPosition claw = {0};
+
+    int current_base = 1500;
+    int current_shoulder = 1500;
+    int current_elbow = 1500;
+    int current_claw = 1500;
+
+    int claw_position = 0;
+
+    while(1) {
+        xQueueReceive(TargetAnglesQueue, &local, 10);
+        xQueueReceive(TargetPositionQueue, &claw, 10);
+        
+        int target_base = (local.theta1 * 2000.0f/180.0f) + 500;
+        int target_shoulder = (local.theta2 * 2000.0f/180.0f) + 500;
+        int target_elbow = (local.theta3 * 2000.0f/180.0f) + 500;
+        int new_claw_pos = claw.C;
+
+        if (current_base + 12 <= target_base){
+            current_base += 10;
+        } else if (current_base > target_base + 12) {
+            current_base -=10;
+        }
+
+        if (current_shoulder + 12 <= target_shoulder){
+            current_shoulder += 10;
+        } else if (current_shoulder > target_shoulder + 12) {
+            current_shoulder -=10;
+        }
+
+        if (current_elbow + 12 <= target_elbow){
+            current_elbow += 10;
+        } else if (current_elbow > target_elbow + 12) {
+            current_elbow -=10;
+        }
+
+        if (claw_position + 3 < new_claw_pos){
+            current_claw += 10;
+        } else if (claw_position > new_claw_pos + 3) {
+            current_claw -= 10;
+        }
+
+        TIM4 -> CCR3 = current_base;
+        TIM3 -> CCR1 = current_shoulder;
+        TIM8 -> CCR2 = current_elbow;
+        TIM3 -> CCR2 = current_claw;
+
+        vTaskDelay(20);
+    }
+
+}
 
 
 void App_Main(void) {
@@ -109,18 +188,23 @@ void App_Main(void) {
     TargetPositionQueue = xQueueCreate(1, sizeof(TargetPosition));
     TargetAnglesQueue = xQueueCreate(1, sizeof(TargetAngles));
 
-    HAL_UART_Transmit(&lpuart1, "1\r\n", 3, 100);
+    //HAL_UART_Transmit(&lpuart1, "1\r\n", 3, 100);
 
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 4);
 
-    HAL_UART_Transmit(&lpuart1, "2\r\n", 3, 100);
+    //HAL_UART_Transmit(&lpuart1, "2\r\n", 3, 100);
 
-    BaseType_t out = xTaskCreate(Input_Task, "Input", 512, NULL, 1, NULL);
-    if (out == pdPASS) {
-        HAL_UART_Transmit(&lpuart1, (uint8_t*)"task successful\r\n", strlen("task successful"), 500);
-    } else {
-        HAL_UART_Transmit(&lpuart1, (uint8_t*)"task failed\r\n", strlen("task failed"), 500);
-    }
+    xTaskCreate(Input_Task, "Input", 128, NULL, 1, NULL);
+    xTaskCreate(Kinematics_Task, "Calculate", 256, NULL, 2, NULL);
+    xTaskCreate(Servo_Task, "Motors", 128, NULL, 3, NULL);
+
+    //Test case for task creation.
+    //BaseType_t out = 
+    // if (out == pdPASS) {
+    //     HAL_UART_Transmit(&lpuart1, (uint8_t*)"task successful\r\n", strlen("task successful"), 500);
+    // } else {
+    //     HAL_UART_Transmit(&lpuart1, (uint8_t*)"task failed\r\n", strlen("task failed"), 500);
+    // }
 
     vTaskStartScheduler();
 

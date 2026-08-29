@@ -38,10 +38,10 @@ void Motor_Init(void) {
     sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
     sConfigOC.Pulse = 1500;
 
-    HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1); // D12 | PA6
-    HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2); // D11 | PA7
-    HAL_TIM_OC_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3); // D15 | PB8
-    HAL_TIM_OC_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_2); // D9 | PC7
+    HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1); // D12 | PA6 Shoulder
+    HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2); // D11 | PA7 Claw
+    HAL_TIM_OC_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3); // D15 | PB8 Base
+    HAL_TIM_OC_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_2); // D9 | PC7 Elbow
 
     GPIO_InitTypeDef Motor_pin = {0};
     
