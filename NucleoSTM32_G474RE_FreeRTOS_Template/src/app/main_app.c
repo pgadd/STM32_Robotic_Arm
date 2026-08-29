@@ -29,6 +29,7 @@ typedef struct {
     float theta1; // Base
     float theta2; // Shoulder
     float theta3; // Elbow
+    float theta4; // Claw
 } TargetAngles;
 
 
@@ -46,7 +47,7 @@ void Input_Task(void *argument) {
     target.x = 0;
     target.y = (int)ELBOW_ARM;
     target.z = (int)SHOULDER_ARM;
-    target.C = 0;
+    target.C = 1500;
 
     while(1) {
         //HAL_UART_Transmit(&lpuart1, "4\r\n", 3, 100);
@@ -89,7 +90,7 @@ void Input_Task(void *argument) {
 
         xQueueOverwrite(TargetPositionQueue, &target);
 
-        vTaskDelay(500);
+        vTaskDelay(20);
 
     }
 }
@@ -108,13 +109,10 @@ void Kinematics_Task(void *argument) {
 
         target_angles.theta2 = (acosf(((SHOULDER_ARM * SHOULDER_ARM) + (d * d) - (ELBOW_ARM * ELBOW_ARM))/(2 * SHOULDER_ARM * d)) *(180.0f / M_PI)) + (atan2f(local.z, r) * (180.0f / M_PI));
 
-        float e = acosf(((SHOULDER_ARM * SHOULDER_ARM) + (ELBOW_ARM * ELBOW_ARM) - (d * d))/ (2 * SHOULDER_ARM * ELBOW_ARM)) * (180.0f / M_PI);
+        target_angles.theta3 = acosf(((SHOULDER_ARM * SHOULDER_ARM) + (ELBOW_ARM * ELBOW_ARM) - (d * d))/ (2 * SHOULDER_ARM * ELBOW_ARM)) * (180.0f / M_PI);
 
-        if ( e >= 90.0f) {
-            target_angles.theta3 = e - 90.0f;
-        } else if ( e < 90.0f) {
-            target_angles.theta3 = 90.0f - e;
-        }
+
+        target_angles.theta4 = local.C;
 
         xQueueOverwrite(TargetAnglesQueue, &target_angles);
  
@@ -125,24 +123,20 @@ void Kinematics_Task(void *argument) {
 
 void Servo_Task(void* pvParameter);
 void Servo_Task(void* pvParameter) {
-    TargetAngles local = {90.0f, 90.0f, 90.0f};
-    TargetPosition claw = {0};
+    TargetAngles local = {90.0f, 90.0f, 90.0f, 1500};
 
     int current_base = 1500;
     int current_shoulder = 1500;
     int current_elbow = 1500;
     int current_claw = 1500;
 
-    int claw_position = 0;
-
     while(1) {
         xQueueReceive(TargetAnglesQueue, &local, 10);
-        xQueueReceive(TargetPositionQueue, &claw, 10);
         
         int target_base = (local.theta1 * 2000.0f/180.0f) + 500;
         int target_shoulder = (local.theta2 * 2000.0f/180.0f) + 500;
         int target_elbow = (local.theta3 * 2000.0f/180.0f) + 500;
-        int new_claw_pos = claw.C;
+        int target_claw = local.theta4;
 
         if (current_base + 12 <= target_base){
             current_base += 10;
@@ -162,9 +156,9 @@ void Servo_Task(void* pvParameter) {
             current_elbow -=10;
         }
 
-        if (claw_position + 3 < new_claw_pos){
+        if (current_claw + 12 < target_claw){
             current_claw += 10;
-        } else if (claw_position > new_claw_pos + 3) {
+        } else if (current_claw > target_claw + 12) {
             current_claw -= 10;
         }
 
@@ -180,7 +174,6 @@ void Servo_Task(void* pvParameter) {
 
 
 void App_Main(void) {
-    //HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 0, 0);
     Motor_Init();
     ADC_Init();
     DMA_Init(&hadc1);
@@ -194,7 +187,7 @@ void App_Main(void) {
 
     //HAL_UART_Transmit(&lpuart1, "2\r\n", 3, 100);
 
-    xTaskCreate(Input_Task, "Input", 128, NULL, 1, NULL);
+    xTaskCreate(Input_Task, "Input", 256, NULL, 1, NULL);
     xTaskCreate(Kinematics_Task, "Calculate", 256, NULL, 2, NULL);
     xTaskCreate(Servo_Task, "Motors", 128, NULL, 3, NULL);
 

@@ -61,4 +61,9 @@ void Motor_Init(void) {
     Motor_pin.Alternate = GPIO_AF4_TIM8;
     HAL_GPIO_Init(GPIOC, &Motor_pin);
 
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+    HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2);
+
 }
